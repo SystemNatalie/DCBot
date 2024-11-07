@@ -2,9 +2,13 @@
 A bot that manages different functionality for 2 discord servers, referred to as ServerA and ServerB.
 
 [General Functionality]:
+    
     * Allow users to send anonymous messages/replies using /secret or /secretreply
+    
     * Snitch switch, which prints who says what for the afore mentioned functionality
+    
     * Allows users without elevated permissions to pin messages by reacting to a message with a pin emoji
+    
     * Delete all messages from a channel using /manualPurge
 
 [ServerA Functionality]:
