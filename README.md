@@ -18,6 +18,7 @@ A bot that manages different functionality for 2 discord servers, referred to as
     * Extended anonymous functionality as described in [General Functionality], with the addition of the option to DM the bot
       to send a message, which allows media to be sent as well.
 
+      * Implements a feature called "YipYap" that lets people anonymously talk as 700+ different characters 
 [ServerB Functionality]:
     
     * Act as a mute switch for two users/bots via /timeoutmomdad, which turns their mute switch on/off
