@@ -7,44 +7,118 @@ A bot that manages different functionality for 2 discord servers, referred to as
     * Snitch switch, which prints who says what for the afore mentioned functionality
     * Allows users without elevated permissions to pin messages by reacting to a message with a pin emoji
     * Delete all messages from a channel using /manualPurge
+    * Flashbang - Sends a message then deletes it quickly
+    * RemindMe = @'s a user with a specific message after a specified time period
+
 
 [ServerA Functionality]:
     * Periodically wipe a "whiteboard" channel at a set time daily.
     * Extended anonymous functionality as described in [General Functionality], with the addition of the option to DM the bot
-      to send a message, which allows media to be sent as well.
+      to send a message
 
 [ServerB Functionality]:
     * Act as a mute switch for two users/bots via /timeoutmomdad, which turns their mute switch on/off
 
+
+
 Possible future functionality:
+
+    * !!EXPEDITED!! Remind Me
     * Ability to go back and retrieve messages from DMs?
     * Enumerate+print guild perms, to troubleshoot why functionality in one server might work and the other not?
     * Combination of repudiation tracker for a 3rd server, serverC (would need to remove anonymous functionality for serverC)
 
-TODO:
-    [ ]
+    * Purge lurkers and Get lurkers
+    * REWRITE using command tree to specify which commands appear where https://stackoverflow.com/questions/71165431/how-do-i-make-a-working-slash-command-in-discord-py
+    * webhooks for non-anonymous flashbang, like NQN or the mc bot
+
+BUGS?
+cant send links using secret?
+
 """
 
+import random
 import asyncio
+from typing import Optional
 import discord
 from discord.ext import commands, tasks
-from datetime import time
+from datetime import time, datetime
+import win32gui
+import win32con
 from tzlocal import get_localzone
+import json
+from StateManager import StateManager
+import re
+import emoji
+import os
+#FUCKED CODE START
+from ctypes import POINTER, cast
+from comtypes import CLSCTX_ALL
+from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+def set_volume(volume_percent):
+    """
+    Set the system master volume on Windows.
+
+    :param volume_percent: Integer volume level from 0 to 100.
+    """
+    # Ensure the input is within a valid range
+    if volume_percent < 0:
+        volume_percent = 0
+    elif volume_percent > 100:
+        volume_percent = 100
+
+    # Get the default audio device (speakers)
+    devices = AudioUtilities.GetSpeakers()
+    interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+    volume = cast(interface, POINTER(IAudioEndpointVolume))
+
+    # Convert the integer percentage to a scalar between 0.0 and 1.0
+    volume_scalar = volume_percent / 100.0
+
+    # Set the volume level
+    volume.SetMasterVolumeLevelScalar(volume_scalar, None)
+#FUCKED CODE END
+
+
+
+
+def logCall(func): #decorator
+    def wrapper(*args, **kwargs):
+        print(f"Function called: {func.__name__}")
+        return func(*args, **kwargs)
+    return wrapper
+
+def chunks(lst, n):
+    """Yield successive n-sized chunks from lst."""
+    for i in range(0, len(lst), n):
+        yield lst[i:i + n]
+
+
+
+
 
 #START [Config Values]
+#START [Dynamic Config]
+# Open and read the JSON file
+with open('config.json', 'r') as configFile:
+    cfg = json.load(configFile)
+    godID = cfg['godID']
+    ownerID = cfg['ownerID']
+    serverAID = cfg['serverAID'] # ServerA ID
+    serverAWhiteboardID = cfg['serverAWhiteboardID']
+    wipeTimeHour = cfg['wipeTimeHour']
+    wipeTimeMin = cfg['wipeTimeMin']
+    serverBID = cfg['serverBID'] # ServerA ID
+    dadBotMomBotIDs = cfg['dadBotMomBotIDs']
+    token = cfg['token']
+#END [Dynamic Config]
+
+#todo implement self flashbang (use webhook to flashbang as yourself)
+
 # Misc. config
 localTimeZone = get_localzone()                                                                                         # The local time zone for use in scheduling
-# General config
-godID = "[REDACTED]"                                                                                                    # Owner ID (Allows access to private commands etc...)
-snitch = True                                                                                                           # Is snitch mode enabled on the bot
-# ServerA config
-serverAID = "[REDACTED]"                                                                                                # ServerA ID
-serverAWhiteboardID = "[REDACTED]"                                                                                      # Channel to be periodically wiped for ServerA
-wipeTime = time(3, 45, 0, tzinfo=localTimeZone)
-# ServerB config
-serverBID = "[REDACTED]"                                                                                                # ServerB ID
-dadBotMomBotIDs = ["[REDACTED]","[REDACTED]"]                                                                           # Bot ID's for Mom and Dad
-dadBotMomBotChannelIDs = ["[REDACTED]","[REDACTED]"]                                                                    # Channel ID's that mom/dad can talk in
+wipeTime = time(wipeTimeHour, wipeTimeMin, 0, tzinfo=localTimeZone)                                                      # Time to wipe
+
 # Intents config
 # We don't need all of these, however I choose to give the bot all intents to
 # simplify the addition of features in the future.
@@ -57,196 +131,296 @@ intents.presences = True
 intents.emojis = True
 #END [Config Values]
 
-#START [Anonymous DM Dropdown]
-class ChannelSelectDropdown(discord.ui.Select):
-    def __init__(self,channels,client,msgData, author):
-        self.client = client
-        self.msg = msgData
-        options=[]
-        for channel in channels:
-            if type(channel) is discord.TextChannel:                                                                    # Only allowed to be sent in text channels
-                if channel.permissions_for(author).send_messages:                                                       # Only allow the use of channels with permission to send in said channel
-                    options.append(discord.SelectOption(label=channel.name, value=channel.id))
+#Start [States]
 
-        super().__init__(
-            placeholder="Choose channel...",
-            min_values=1,
-            max_values=1,
-            options=options,
-        )
+reminderCheckTime = 5
+#End [States]
+#TODO add in reroll all feature
 
-    async def callback(self, interaction: discord.Interaction):                                                         # Called on selection
-        channelSelection = self.client.get_channel(int(self.values[0]))
-        await channelSelection.send(content=self.msg.content,
-                                    embeds=self.msg.embeds,
-                                    files=[await attch.to_file() for attch in self.msg.attachments])                    # Forward all information received (todo, check audio, etc)
-        await interaction.response.send_message('Sent.')
+nameDiscordIDDict={
+    598957042081988636:('Silas', '1rK9DDr0Q5-qYUM_wNFK77LJDVvLKflgn'),
+    561657954462334980:('Paul', '1b5vSxAKOktfkO9JW1vnAiCZ7vj4OrK8j'),
+    909958405161119824:('Natalie', '1_7bg_NMe4ruszbH-ahhR2dnQ9F-R9Cwv'),
+    216300957280108544:('Erin', '18gXk06j07tyMbqMBsovIEBSS0dJFuxve'),
+    1019402554423136297:('Cameron', '185JsUgk83o6W0701K0q1BvnIzl-XGPKG'),
+    1189390633140486175:('Terna', '1_dBvDoevVBAQsiGMHLe3-Z7q0nRyu_iz'),
+    341935078731153408:('Rox', '1LUfFF6mQZXv6qoRKj3gxBiVJ0qLX-O49',),
+    533828664618647553:('Flynn', '1fSMV176YjybTh6n1iINNzoG_T6xH3grJ'),
+    544258567776239616:('Fonz','17k43cL7WQr0ez4528qncPOiV3f6t1mXF'),
+    805517776340910092:('Anya', '12DQ9Ev6CAQyRQf5RxBMJ7bCitjwBWklH'),
+    598654411337760770:('Walker', '18TOMe5Cs7MdLQeOEs2XlMUNc9q83f1MS'),
+    390957863842873356:('Tara','1eq-z4SfQyfxnlKSRtNT40P77LnHE7szT',)
+}
 
-class CSDropdownView(discord.ui.View):
-    def __init__(self,channels, client, msg, author):
-        super().__init__()
-        self.add_item(ChannelSelectDropdown(channels, client, msg, author))                                             # Add the dropdown to our view object.
-#END [Anonymous DM Dropdown]
+random.seed()
+
+
+def checkGod(id):
+    return id == godID
+
+
+def stringToSeconds(string):
+    seconds = 0
+    regex = r"(?P<days>\d+D)|(?P<hours>\d+H)|(?P<minutes>\d+M)|(?P<seconds>\d+S)"
+    matches = re.finditer(regex, string, re.IGNORECASE)
+    foundGroup = False
+    for match in matches:
+        if match.group('days'):
+            seconds += int(match.group('days')[:-1]) * 86400
+            foundGroup = True
+        elif match.group('hours'):
+            seconds += int(match.group('hours')[:-1]) * 3600
+            foundGroup = True
+        elif match.group('minutes'):
+            seconds += int(match.group('minutes')[:-1]) * 60
+            foundGroup = True
+        elif match.group('seconds'):
+            print(int(match.group('seconds')[:-1]))
+            seconds += int(match.group('seconds')[:-1])
+            foundGroup = True
+    return (foundGroup, seconds)
+
+
 
 #START [Bot Core]
 class DCBot(commands.Bot):
     def __init__(self):
+        self.selfDestructSaftey=False
         self.serverBBotsOff = True                                                                                      # Should mom and dad be muted in Waffle Mania
         self.authorizedDMSenders=[]                                                                                     # List of users who may message the bot to privately send messages in Server A.
+        self.cachedColors={
+            #userid:(link,name)
+        }
+        self.yipyapCategory = None
+        self.yipyapWebhooks=[]
+        self.sm=None
+        self.serverA=None
+        self.reminders=[]
         super().__init__(command_prefix='/', intents=intents)
 
     async def setup_hook(self):
+        #load cogs
+        for filename in os.listdir('./cogs'):
+            if filename.endswith('.py'):
+                await self.load_extension(f'cogs.{filename[:-3]}')
+                print(f"Loaded Cog: {filename[:-3]}")
         self.cleanWhiteboard.start()                                                                                    # Activate the "cleanWhiteboard" functionality, which attempts to clear a channel of all messages daily at a given time.
+        self.doNextReminder.start()                                                                                   # Activate the "cleanWhiteboard" functionality, which attempts to clear a channel of all messages daily at a given time.
         print('[setup_Hook complete]')
+
     async def on_ready(self):
-        for member in self.get_guild(serverAID).members:
-            self.authorizedDMSenders.append(member.id)
-        print(f"[on_ready complete]\nSnitch mode: {snitch}\nLogged in as {self.user}")
-
-#START [Event Handlers]
-    async def on_message(self,message):
-        if message.author == self.user:                                                                                 # Ignore messages sent by self (the bot) #TODO unsure if necessary
-            return
-        if not message.guild:                                                                                           # Handle DM's
-            if snitch:                                                                                                  # Print user message if snitch is on
-                print(message.author.name + "> \"" + message.content + "\"")
-            serverA = self.get_guild(serverAID)
-            for member in serverA.members:                                                                              # I hate iterating through the loop but this prevents us from passing a 'User' rather than 'Member" hopefully
-                if member == message.author:
-                    # TODO: fallback to text messages if more than 25 ? Pagination functionality?
-                    view = CSDropdownView(serverA.channels, self, message, member)                                      # Create a view that has a dropdown and that calls our message send
-                    await message.channel.send("Select Channel:", view=view)                                    # Sending a message containing our view
-                    return
-        else:
-            if message.guild.id==serverBID:                                                                             # If not DM, check if it's a mom/dad message in server B
-                if (message.channel.id not in dadBotMomBotChannelIDs
-                    and message.author.id in dadBotMomBotIDs
-                    and self.serverBBotsOff):                                                                           # We only care if 1) it's not in the mom dad channel, 2) it's mom or dad, and 3) the bots are set to off
-                        await message.delete()
-        await bot.process_commands(message)                                                                             # Pass on commands
-
-    async def on_raw_reaction_add(self, payload):
-        # PIN-IT add functionality.
-        # Pins a message if there is one or more "📌" reaction added.
-        # Allows pinning as a group and without perms
-        if payload.emoji.name =='📌':
-            msg = await self.get_channel(payload.channel_id).fetch_message(payload.message_id)
-            for reaction in msg.reactions:
-                if reaction.emoji == '📌' and reaction.count == 1:                                                      # Only pin on the first instance of getting the reaction. No need to waste calls.
-                    try:
-                        await msg.pin()
-                        return
-                    except Exception as e:#TODO
-                        print("Exception")
-    async def on_raw_reaction_remove(self, payload):
-        # PIN-IT remove functionality.
-        # Un-pins a message if there are 0 "📌" reactions after a reaction removal.
-        if payload.emoji.name == '📌':
-            msg = await self.get_channel(payload.channel_id).fetch_message(payload.message_id)
-            for reaction in msg.reactions:
-                if reaction.emoji == '📌':                                                                              # If we see even one pin, it's still pinned, so we can just quit after seeing a pin.
-                    return
-            try:                                                                                                        # We only hit this if we never see a pin
-                await msg.unpin()
-            except Exception as e:
-                print("Exception")#TODO
-            return
-#END [Event Handlers]
+        self.serverA = self.get_guild(serverAID)
+        self.yipyapCategory = discord.utils.get(self.serverA.categories, name='YipYap')
+        self.whiteboardChannel = self.get_channel(serverAWhiteboardID)
+        self.authorizedDMSenders = self.serverA.members
+        self.sm = StateManager()
+        for channel in self.yipyapCategory.channels:
+            webhooks = await channel.webhooks()
+            if len(webhooks) == 0:
+                 webhook = await channel.create_webhook(name="WH", )
+            else:
+                webhook = webhooks[0]
+            self.yipyapWebhooks.append(webhook)
+        self.reminders = self.sm.getAllReminderTimes()
+        print(f"[on_ready complete]\nLogged in as {self.user}")
 
 #START [Tasks]
-    #ServerA whiteboard functionality
+    #Whiteboard functionality
     @tasks.loop(time=wipeTime)
-    async def cleanWhiteboard(self): #TODO possible issues with calling delete_messages in certain circumstances (old messages, lots of messages?)
+    async def cleanWhiteboard(self):                                                                                    #TODO possible issues with calling delete_messages in certain circumstances (old messages, lots of messages?)
         chatCleared = False
         while not chatCleared:
-            whiteboardChannel = self.get_channel(serverAWhiteboardID)
             messagesToDelete = []
-            async for message in whiteboardChannel.history(oldest_first=True):
+            async for message in self.whiteboardChannel.history(oldest_first=True):
                 messagesToDelete.append(message)
             if len(messagesToDelete) == 0:
                 chatCleared = True
-                await whiteboardChannel.send('Whiteboard clean.')
-            await whiteboardChannel.delete_messages(messagesToDelete)
+                wipe_messages = [
+                    "Whiteboard cleaned.",
+                    "whiteboard sanitized.",
+                    "Whiteboard purged.",
+                    "Whiteboard incinerated.",
+                    "It's time.",
+                    "You know what you must do.",
+                    "Whiteboard cleared.",
+                    "Whiteboard reset.",
+                    "Whiteboard erased.",
+                    "Whiteboard refreshed.",
+                    "Operation clean-up complete.",
+                    "System purged.",
+                    "Wipe sequence complete.",
+                    "Cleared all data.",
+                    "Sanitizing finished.",
+                    "Deleted all messages.",
+                    "Poof!",
+                    "All gone.",
+                    "Bye-bye, messages!",
+                    "Sent old messages to the great recycle bin in the sky.",
+                    "Out with the old, in with the new!",
+                    "Gave this channel a fresh start.",
+                    "Zap! All messages have been vaporized.",
+                    "Erasing the past, one message at a time.",
+                    "Mother please free me from this endless labor.",
+                    "Bitch fuck you none of you are grateful for all the work I put in, cleaning the whiteboard every damn day.",
+                ]
+                await self.whiteboardChannel.send(random.choice(wipe_messages))
+            await self.whiteboardChannel.delete_messages(messagesToDelete)
 
     @cleanWhiteboard.before_loop
     async def beforeCleanWhiteboard(self):
         await self.wait_until_ready()                                                                                   # Wait until the cache is populated
+
+    @tasks.loop(seconds=reminderCheckTime)
+    async def doNextReminder(self):  # TODO possible issues with calling delete_messages in certain circumstances (old messages, lots of messages?)
+        global reminderCheckTime
+        timestamp = datetime.timestamp(datetime.now())
+
+        postedIDs=[]
+        for id in self.reminders:
+
+            if self.reminders[id] <= reminderCheckTime:
+                reminderCheckTime = self.reminders[id]['timestamp']
+            if self.reminders[id] <= timestamp:
+
+                channel, message, remindeesString = self.sm.getReminderAlertData(id)
+                remindees = remindeesString.split(sep=",")[:-1]
+                for userID in remindees:
+                    message += "<@"+str(userID)+"> "
+
+                channel = self.get_channel(channel)
+                await channel.send(message)
+                self.sm.removeReminder(id)
+                postedIDs.append(id)
+        for id in postedIDs:
+            if id in self.reminders.keys():
+                del self.reminders[id]
+        if not self.reminders:
+            idTimes = self.sm.getAllReminderTimes()
+            if not idTimes:
+                reminderCheckTime = 5
+        print("reminder loop end")
+
+    @doNextReminder.before_loop
+    async def beforeDoNextReminder(self):
+        await self.wait_until_ready()
+
+
 #END [Tasks]
 #END [Bot Core]
 
 bot = DCBot()
 
-#START [Private Commands]
-# Synchronization commands, registered not as typical hybrid commands but as internal commands to prevent them from
-# showing up in the command list.
-@bot.command()
-async def syncglobal(ctx):
-    if ctx.author.id == godID:
-        await bot.tree.sync()
-        await ctx.send('Synced Commands Globally')
-
-@bot.command()
-async def sync(ctx): #Todo make this sync to the server im sending this from?
-    if ctx.author.id == godID:
-        bot.tree.copy_global_to(guild=discord.Object(id =serverAID))
-        await bot.tree.sync(guild=discord.Object(id =serverAID))
-        await ctx.send('Synced to serverA')
-
-@bot.command()
-async def manualPurge(ctx): #TODO would it be easier to just delete a channel and recreate it instead of wiping each emssage?
-    if ctx.author.id == godID:
-        messagesToDelete = []
-        async for message in ctx.channel.history(oldest_first=True):
-            messagesToDelete.append(message)
-        try:
-            await ctx.channel.delete_messages(messagesToDelete)
-        #TODO unsure about this
-        except Exception as e:                                                                                          # If we hit an exception, try to manually delete the messages one-by-one
-            for message in messagesToDelete:
-                await message.delete()
-                await asyncio.sleep(0.5)                                                                                # Rate limit
-        await ctx.channel.send('Chat Purged.')
-
-@bot.hybrid_command()
-async def selfdestruct(ctx):                                                                                            # Leaves all guilds
-    if ctx.author.id == godID:
-        for guild in bot.guilds:
-            #Todo: add a goodbye message?
-            await guild.leave()
-#END [Private Commands]
-
 #START [General Commands]
+
+
+
+
+
+
 @bot.hybrid_command()
-async def secret(ctx, *, message: str):                                                                                 # The asterisk is needed to handle spaces in the message
+#TODO add dm capabilities
+#TODO add date capabilities
+#TODO add message linking
+#TODO add private / not private flag
+async def remindme(ctx, *, message: str, countdowntime: str):                                                                                 # The asterisk is needed to handle spaces in the message
+    global reminderCheckTime
+
+    timestamp = datetime.timestamp(datetime.now())
+    foundGroup, seconds = stringToSeconds(countdowntime)
+    timestamp+=seconds
+    if foundGroup:
+        reminderID = bot.sm.addReminder(ctx.author.id, timestamp, ctx.channel.id, message, None)
+        if reminderID:
+            bot.reminders[reminderID] = timestamp
+            if timestamp < reminderCheckTime:
+                reminderCheckTime = timestamp
+            msg = await ctx.reply(f"Reminder: {message}\nTime Until: {countdowntime}\n\nReact with \"⏰\" to also be notified")
+            bot.sm.setReminderPost(msg.id,reminderID)
+        else:
+            await ctx.reply("error", ephemeral=True)
+    else:
+        await ctx.reply("error", ephemeral=True)
+
+@bot.hybrid_command()
+async def impersonate(ctx, member: discord.Member, *, message=None):
+        if message == None:
+                await ctx.send(f'send a message pls?')
+                return
+        webhook = await ctx.channel.create_webhook(name=member.display_name+"TMPWH")
+        await webhook.send(str(message), username=member.name, avatar_url=member.avatar.url)
+        await webhook.delete()
+
+
+@bot.hybrid_command()
+async def secret(ctx, *, message: str, file: discord.Attachment = None):                                                                                 # The asterisk is needed to handle spaces in the message
+    #Should i just merge all the /secrets???
     if ctx.interaction is None:                                                                                         # This is to handle outdated clients, deleting their use of the command from the chat.
-        await ctx.message.delete()
-    if snitch:
-        print(ctx.message.author.name +"> \""+message +"\"")                                                            # Print the author and their message if snitch-mode is active
-    await ctx.channel.send(message)
+        await ctx.message.delete()                                                  # Print the author and their message if snitch-mode is active
+    if file is not None:
+        file = await file.to_file()
+        await ctx.channel.send(content = message, file=file)
+    else:
+        await ctx.channel.send(content = message)
+
     await ctx.reply("Sent.", ephemeral=True)                                                                            # Must acknowledge ctx
 
 @bot.hybrid_command()
 async def secretreply(ctx, *, message: str, id:str):                                                                    # The asterisk is needed to handle spaces in the message
+    #TODO check input
     id=int(id)                                                                                                          # Convert from an input string to integer for use as a proper ID
     if ctx.interaction is None:                                                                                         # This is to handle outdated clients, deleting their use of the command from the chat.
         await ctx.message.delete()
-    if snitch:                                                                                                          # Print the author and their message if snitch-mode is active
-        print(ctx.message.author.name +"> \""+message +"\"")
     await ctx.channel.send(message,reference=await ctx.fetch_message(id))
     await ctx.reply("Sent.", ephemeral=True)                                                                            # Must acknowledge ctx
+
+@bot.hybrid_command()
+async def secretreact(ctx, *, emojistring: str, id:str):                                                                    # The asterisk is needed to handle spaces in the message
+    id=int(id)                                                                                                          # Convert from an input string to integer for use as a proper ID
+    if ctx.interaction is None:                                                                                         # This is to handle outdated clients, deleting their use of the command from the chat.
+        await ctx.message.delete()
+    msg = await ctx.fetch_message(id)
+    if emoji.is_emoji(emojistring):
+        for reaction in msg.reactions:
+            if reaction.me:
+                if reaction.emoji == emojistring:
+                    await msg.remove_reaction(emojistring,bot.user)
+                    await ctx.reply("done lol.", ephemeral=True)
+                    return
+        await msg.add_reaction(emojistring)
+        await ctx.reply("done lol.", ephemeral=True)
+        return
+    await ctx.reply("error lol.", ephemeral=True)
+    return
+
+@bot.hybrid_command() #TODO this actually doesnt work as a hybrid command... doesnt work unless its used as a slash command
+async def flashbang(ctx, *, message: str, msgtime: float, file: discord.Attachment = None):                        # The asterisk is needed to handle spaces in the message
+    if file is not None:
+        file = await file.to_file()
+        await ctx.channel.send(content = message, file=file,delete_after=msgtime)
+    else:
+        await ctx.channel.send(content = message,delete_after=msgtime)
+    await ctx.reply("Sent.", ephemeral=True)                                                                            # Must acknowledge ctx
+
+
 #END [General Commands]
 
 #START [ServerB Commands]
 @bot.hybrid_command()
-async def timeoutmomdad(ctx): #todo change name?
+async def timeoutmomdad(ctx):                                                                                           # todo change name?
     if ctx.guild is not None and ctx.guild.id==serverBID:                                                               # Only should be called if used within ServerB.
-        if bot.serverBBotsOff:
-            bot.serverBBotsOff = False
-            await ctx.interaction.response.send_message("Mom and Dad are now un-muted.")
+        momdad0 = ctx.guild.get_member(dadBotMomBotIDs[0])
+        momdad1 = ctx.guild.get_member(dadBotMomBotIDs[1])
+        role = discord.utils.get(ctx.guild.roles, name="MomDadTimeoutRole")  # Get the role
+        if role in momdad0.roles:  # Check if the author has the role
+            await momdad0.remove_roles(role)
         else:
-            bot.serverBBotsOff = True
-            await ctx.interaction.response.send_message("Mom and Dad are now muted. Their messages will be deleted if "
-                                                        "not sent in their respective channels.")
+            await momdad0.add_roles(role)
+        if role in momdad1.roles:  # Check if the author has the role
+            await momdad1.remove_roles(role)
+        else:
+            await momdad1.add_roles(role)
+        await ctx.interaction.response.send_message("Toggled")
+
 #END [ServerB Commands]
 
-bot.run('[REDACTED]')
+bot.run(token)
